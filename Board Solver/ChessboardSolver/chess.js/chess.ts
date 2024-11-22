@@ -463,3 +463,268 @@ function strippedSan(move: string) {
 function trimFen(fen: string): string {
   return fen.split(' ').slice(0, 4).join(' ')
 }
+
+export class Chess {
+  private _board = new Array<Piece>(128)
+  private _turn: Color = WHITE
+  private _header: Record<string, string> = {}
+  private _kings: Record<Color, number> = { w: EMPTY, b: EMPTY }
+  private _epSquare = -1
+  private _halfMoves = 0
+  private _moveNumber = 0
+  private _history: History[] = []
+  private _comments: Record<string, string> = {}
+  private _castling: Record<Color, number> = { w: 0, b: 0 }
+
+  private _positionCount: Record<string, number> = {}
+
+  constructor(fen = DEFAULT_POSITION) {
+    this.load(fen)
+  }
+
+  clear({ preserveHeaders = false } = {}) {
+    this._board = new Array<Piece>(128)
+    this._kings = { w: EMPTY, b: EMPTY }
+    this._turn = WHITE
+    this._castling = { w: 0, b: 0 }
+    this._epSquare = EMPTY
+    this._halfMoves = 0
+    this._moveNumber = 1
+    this._history = []
+    this._comments = {}
+    this._header = preserveHeaders ? this._header : {}
+    this._positionCount = {}
+
+    delete this._header['SetUp']
+    delete this._header['FEN']
+  }
+
+  removeHeader(key: string) {
+    if (key in this._header) {
+      delete this._header[key]
+    }
+  }
+
+  load(fen: string, { skipValidation = false, preserveHeaders = false } = {}) {
+    let tokens = fen.split(/\s+/)
+
+    if (tokens.length >= 2 && tokens.length < 6) {
+      const adjustments = ['-', '-', '0', '1']
+      fen = tokens.concat(adjustments.slice(-(6 - tokens.length))).join(' ')
+    }
+
+    tokens = fen.split(/\s+/)
+
+    if (!skipValidation) {
+      const { ok, error } = validateFen(fen)
+      if (!ok) {
+        throw new Error(error)
+      }
+    }
+
+    const position = tokens[0]
+    let square = 0
+
+    this.clear({ preserveHeaders })
+
+    for (let i = 0; i < position.length; i++) {
+      const piece = position.charAt(i)
+
+      if (piece === '/') {
+        square += 8
+      } else if (isDigit(piece)) {
+        square += parseInt(piece, 10)
+      } else {
+        const color = piece < 'a' ? WHITE : BLACK
+        this._put(
+          { type: piece.toLowerCase() as PieceSymbol, color },
+          algebraic(square),
+        )
+        square++
+      }
+    }
+
+    this._turn = tokens[1] as Color
+
+    if (tokens[2].indexOf('K') > -1) {
+      this._castling.w |= BITS.KSIDE_CASTLE
+    }
+    if (tokens[2].indexOf('Q') > -1) {
+      this._castling.w |= BITS.QSIDE_CASTLE
+    }
+    if (tokens[2].indexOf('k') > -1) {
+      this._castling.b |= BITS.KSIDE_CASTLE
+    }
+    if (tokens[2].indexOf('q') > -1) {
+      this._castling.b |= BITS.QSIDE_CASTLE
+    }
+
+    this._epSquare = tokens[3] === '-' ? EMPTY : Ox88[tokens[3] as Square]
+    this._halfMoves = parseInt(tokens[4], 10)
+    this._moveNumber = parseInt(tokens[5], 10)
+
+    this._updateSetup(fen)
+    this._incPositionCount(fen)
+  }
+
+  fen() {
+    let empty = 0
+    let fen = ''
+
+    for (let i = Ox88.a8; i <= Ox88.h1; i++) {
+      if (this._board[i]) {
+        if (empty > 0) {
+          fen += empty
+          empty = 0
+        }
+        const { color, type: piece } = this._board[i]
+
+        fen += color === WHITE ? piece.toUpperCase() : piece.toLowerCase()
+      } else {
+        empty++
+      }
+
+      if ((i + 1) & 0x88) {
+        if (empty > 0) {
+          fen += empty
+        }
+
+        if (i !== Ox88.h1) {
+          fen += '/'
+        }
+
+        empty = 0
+        i += 8
+      }
+    }
+
+    let castling = ''
+    if (this._castling[WHITE] & BITS.KSIDE_CASTLE) {
+      castling += 'K'
+    }
+    if (this._castling[WHITE] & BITS.QSIDE_CASTLE) {
+      castling += 'Q'
+    }
+    if (this._castling[BLACK] & BITS.KSIDE_CASTLE) {
+      castling += 'k'
+    }
+    if (this._castling[BLACK] & BITS.QSIDE_CASTLE) {
+      castling += 'q'
+    }
+
+    castling = castling || '-'
+
+    let epSquare = '-'
+    if (this._epSquare !== EMPTY) {
+      const bigPawnSquare = this._epSquare + (this._turn === WHITE ? 16 : -16)
+      const squares = [bigPawnSquare + 1, bigPawnSquare - 1]
+
+      for (const square of squares) {
+        if (square & 0x88) {
+          continue
+        }
+
+        const color = this._turn
+
+        if (
+          this._board[square]?.color === color &&
+          this._board[square]?.type === PAWN
+        ) {
+          this._makeMove({
+            color,
+            from: square,
+            to: this._epSquare,
+            piece: PAWN,
+            captured: PAWN,
+            flags: BITS.EP_CAPTURE,
+          })
+          const isLegal = !this._isKingAttacked(color)
+          this._undoMove()
+
+          if (isLegal) {
+            epSquare = algebraic(this._epSquare)
+            break
+          }
+        }
+      }
+    }
+
+    return [
+      fen,
+      this._turn,
+      castling,
+      epSquare,
+      this._halfMoves,
+      this._moveNumber,
+    ].join(' ')
+  }
+
+  private _updateSetup(fen: string) {
+    if (this._history.length > 0) return
+
+    if (fen !== DEFAULT_POSITION) {
+      this._header['SetUp'] = '1'
+      this._header['FEN'] = fen
+    } else {
+      delete this._header['SetUp']
+      delete this._header['FEN']
+    }
+  }
+
+  reset() {
+    this.load(DEFAULT_POSITION)
+  }
+
+  get(square: Square): Piece | undefined {
+    return this._board[Ox88[square]]
+  }
+
+  put({ type, color }: { type: PieceSymbol; color: Color }, square: Square) {
+    if (this._put({ type, color }, square)) {
+      this._updateCastlingRights()
+      this._updateEnPassantSquare()
+      this._updateSetup(this.fen())
+      return true
+    }
+    return false
+  }
+
+  private _put(
+    { type, color }: { type: PieceSymbol; color: Color },
+    square: Square,
+  ) {
+    // check for piece
+    if (SYMBOLS.indexOf(type.toLowerCase()) === -1) {
+      return false
+    }
+
+    // check for valid square
+    if (!(square in Ox88)) {
+      return false
+    }
+
+    const sq = Ox88[square]
+
+    // don't let the user place more than one king
+    if (
+      type == KING &&
+      !(this._kings[color] == EMPTY || this._kings[color] == sq)
+    ) {
+      return false
+    }
+
+    const currentPieceOnSquare = this._board[sq]
+
+    if (currentPieceOnSquare && currentPieceOnSquare.type === KING) {
+      this._kings[currentPieceOnSquare.color] = EMPTY
+    }
+
+    this._board[sq] = { type: type as PieceSymbol, color: color as Color }
+
+    if (type === KING) {
+      this._kings[color] = sq
+    }
+
+    return true
+  }
+}
