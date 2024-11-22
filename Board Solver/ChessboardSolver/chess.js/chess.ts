@@ -402,4 +402,64 @@ function getDisambiguator(move: InternalMove, moves: InternalMove[]) {
   return ''
 }
 
-//addMove
+
+function addMove(
+  moves: InternalMove[],
+  color: Color,
+  from: number,
+  to: number,
+  piece: PieceSymbol,
+  captured: PieceSymbol | undefined = undefined,
+  flags: number = BITS.NORMAL,
+) {
+  const r = rank(to)
+
+  if (piece === PAWN && (r === RANK_1 || r === RANK_8)) {
+    for (let i = 0; i < PROMOTIONS.length; i++) {
+      const promotion = PROMOTIONS[i]
+      moves.push({
+        color,
+        from,
+        to,
+        piece,
+        captured,
+        promotion,
+        flags: flags | BITS.PROMOTION,
+      })
+    }
+  } else {
+    moves.push({
+      color,
+      from,
+      to,
+      piece,
+      captured,
+      flags,
+    })
+  }
+}
+
+function inferPieceType(san: string) {
+  let pieceType = san.charAt(0)
+  if (pieceType >= 'a' && pieceType <= 'h') {
+    const matches = san.match(/[a-h]\d.*[a-h]\d/)
+    if (matches) {
+      return undefined
+    }
+    return PAWN
+  }
+  pieceType = pieceType.toLowerCase()
+  if (pieceType === 'o') {
+    return KING
+  }
+  return pieceType as PieceSymbol
+}
+
+// parses all of the decorators out of a SAN string
+function strippedSan(move: string) {
+  return move.replace(/=/, '').replace(/[+#]?[?!]*$/, '')
+}
+
+function trimFen(fen: string): string {
+  return fen.split(' ').slice(0, 4).join(' ')
+}
